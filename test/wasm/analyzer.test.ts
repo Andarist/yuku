@@ -45,8 +45,8 @@ describe("@yuku-analyzer/wasm", () => {
     expect(mod.symbols.map((s) => s.name)).toEqual(["emoji", "após"]);
   });
 
-  test("materializes and indexes parents through the iterative decoder fallback", () => {
-    // force the fallback, then build the structural parent index iteratively
+  test("materializes deeply and indexes parents through the iterative decoder", () => {
+    // materialize deeply, then build the structural parent index iteratively
     const mod = analyze(deepAnalyzerSource, { path: "input.js" });
     const statement = mod.ast.body[0];
     if (statement?.type !== "ExpressionStatement") {

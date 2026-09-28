@@ -74,7 +74,7 @@ describe("@yuku-parser/wasm", () => {
   });
 
   test("materializes an AST deeper than the JavaScript stack", () => {
-    // force the fallback and verify the complete left-associated shape without recursion
+    // verify the complete left-associated shape without recursion in the test
     const { program } = parse(deepSource, { lang: "js" });
     const statement = program.body[0];
     if (statement?.type !== "ExpressionStatement") {

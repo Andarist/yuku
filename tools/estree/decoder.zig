@@ -461,9 +461,9 @@ fn u16At(comptime word: []const u8, comptime byte_in_word: u8) []const u8 {
 
 fn writeNodeFunction(w: *Writer, mode: Mode) !void {
     comptime std.debug.assert(rt.NODE_FLAGS_OFFSET / 4 == 0);
-    const node_depth_max: u32 = 64;
-    comptime std.debug.assert(node_depth_max > 0);
-    comptime std.debug.assert(node_depth_max < 1024);
+    const node_work_capacity_initial: u32 = 64;
+    comptime std.debug.assert(node_work_capacity_initial > 0);
+    comptime std.debug.assert(node_work_capacity_initial < 1024);
     const flags_expr = comptime u16At("h0", rt.NODE_FLAGS_OFFSET % 4);
     comptime std.debug.assert(rt.ATTACHED_COMMENT_FLAGS_OFFSET == 0);
     comptime std.debug.assert(rt.ATTACHED_COMMENT_SIZE % 4 == 0);
@@ -519,7 +519,6 @@ fn writeNodeFunction(w: *Writer, mode: Mode) !void {
         \\  }
         \\  const _inner = _attached ? nodeWithComments : _decode;
         \\  let _nodes, _nodeWork;
-        \\  let _nodeDepth = 0;
         \\
     );
     if (mode == .parser) try w.writeAll("  const _memoize = false;\n");
@@ -529,102 +528,107 @@ fn writeNodeFunction(w: *Writer, mode: Mode) !void {
         \\
     );
     try w.print(
+        \\  const NODE_MISSING = {{}};
+        \\  const NODE_WORK_CAPACITY_INITIAL = {[capacity]d};
+        \\  let _nodeMissing = 0, _nodeNext = 0;
         \\  function node(i) {{
+        \\    const result = _nodes[i];
+        \\    if (result !== undefined) return result;
+        \\    _nodeMissing = i;
+        \\    throw NODE_MISSING;
+        \\  }}
+        \\  function growNodeWork(work) {{
+        \\    const capacity = Math.min(work.indexes.length * 2, nodeCount);
+        \\    if (capacity <= work.indexes.length)
+        \\      throw new RangeError("yuku: invalid AST buffer");
+        \\    const indexes = new Uint32Array(capacity);
+        \\    indexes.set(work.indexes);
+        \\    return {{ indexes, states: work.states }};
+        \\  }}
+        \\  function materialize(i) {{
         \\    if (i < 0 || i >= nodeCount)
         \\      throw new RangeError("yuku: invalid AST buffer");
-        \\    if (_memoize && _nodes === undefined) _nodes = Array.from({{ length: nodeCount }});
-        \\    if (_nodes !== undefined) {{
-        \\      const cached = _nodes[i];
-        \\      if (cached !== undefined) return cached;
-        \\    }}
-        \\    if (_nodeDepth === {[depth]d}) return nodeDeep(i);
-        \\    _nodeDepth++;
-        \\    const result = _inner(i);
-        \\    _nodeDepth--;
-        \\    if (_memoize) _nodes[i] = result;
+        \\    if (_nodes === undefined) _nodes = {[nodes]s};
+        \\    const cached = _nodes[i];
+        \\    if (cached !== undefined) return cached;
         \\
-    , .{ .depth = node_depth_max });
+    , .{
+        .capacity = node_work_capacity_initial,
+        .nodes = if (mode == .parser) "[]" else "Array.from({ length: nodeCount })",
+    });
+    try w.writeAll(
+        \\    const end = i + 1;
+        \\    while (_nodeNext < end) {
+        \\      try {
+        \\        while (_nodeNext < end) {
+        \\          const current = _nodeNext;
+        \\          if (_nodes[current] === undefined) {
+        \\            const result = _inner(current);
+        \\            _nodes[current] = result;
+        \\
+    );
     if (mode == .analyzer) try w.writeAll(
-        \\    if (result !== null && typeof result === "object" && !_nodeIndexes.has(result))
-        \\      _nodeIndexes.set(result, i);
+        \\            if (result !== null && typeof result === "object" &&
+        \\                !_nodeIndexes.has(result)) _nodeIndexes.set(result, current);
         \\
     );
     try w.writeAll(
-        \\    if (!_memoize && _nodeDepth === 0) _nodes = undefined;
-        \\    if (_nodeDepth === 0) _nodeWork = undefined;
-        \\    return result;
-        \\  }
-        \\  function nodeDeep(i) {
-        \\    if (_nodes === undefined) _nodes = Array.from({ length: nodeCount });
-        \\    const work = _nodeWork ??= {
-        \\      indexes: new Uint32Array(nodeCount),
-        \\      operations: new Uint8Array(nodeCount),
-        \\      items: new Uint32Array(nodeCount),
-        \\      states: new Uint8Array(nodeCount),
-        \\    };
-        \\    let depth = 1;
-        \\    work.indexes[0] = i;
-        \\    work.operations[0] = 0;
-        \\    work.items[0] = 0;
-        \\    work.states[i] = 1;
-        \\    while (depth !== 0) {
-        \\      const frame = depth - 1;
-        \\      const current = work.indexes[frame];
-        \\      const offset = _nodesOff + current * _nodeSize;
-        \\      const tag = _u8[offset];
-        \\      if (tag >= CHILD_SLOTS.length) throw new RangeError("yuku: invalid AST buffer");
-        \\      const childOperations = CHILD_SLOTS[tag];
-        \\      const operation = work.operations[frame];
-        \\      if (operation < childOperations.length) {
-        \\        const kind = childOperations[operation];
-        \\        const slot = childOperations[operation + 1];
-        \\        const base = offset >> 2;
-        \\        let child;
-        \\        if (kind === 0) {
-        \\          work.operations[frame] = operation + 2;
-        \\          child = _u32[base + slot];
-        \\        } else {
-        \\          const item = work.items[frame];
-        \\          const start = _u32[base + slot];
-        \\          const length = _u32[base + slot + 1];
-        \\          const extraBase = extraRange(start, length);
-        \\          if (item < length) {
-        \\            work.items[frame] = item + 1;
-        \\            child = _u32[extraBase + item];
-        \\          } else {
-        \\            work.operations[frame] = operation + 2;
-        \\            work.items[frame] = 0;
-        \\            continue;
         \\          }
+        \\          _nodeNext++;
         \\        }
-        \\        if (child === NULL) continue;
-        \\        if (child < 0 || child >= nodeCount)
-        \\          throw new RangeError("yuku: invalid AST buffer");
-        \\        if (_nodes[child] !== undefined) continue;
-        \\        if (work.states[child] !== 0)
-        \\          throw new RangeError("yuku: cyclic AST buffer");
-        \\        if (depth === nodeCount) throw new RangeError("yuku: invalid AST buffer");
-        \\        work.indexes[depth] = child;
-        \\        work.operations[depth] = 0;
-        \\        work.items[depth] = 0;
-        \\        work.states[child] = 1;
-        \\        depth++;
         \\        continue;
+        \\      } catch (error) {
+        \\        if (error !== NODE_MISSING) throw error;
         \\      }
-        \\      const result = _inner(current);
-        \\      _nodes[current] = result;
-        \\      work.states[current] = 2;
+        \\      let work = _nodeWork;
+        \\      if (work === undefined) {
+        \\        const capacity = Math.min(nodeCount, NODE_WORK_CAPACITY_INITIAL);
+        \\        work = _nodeWork = {
+        \\          indexes: new Uint32Array(capacity),
+        \\          states: new Uint8Array(nodeCount),
+        \\        };
+        \\      }
+        \\      const start = _nodeNext;
+        \\      let depth = 1;
+        \\      work.indexes[0] = start;
+        \\      work.states[start] = 1;
+        \\      while (depth !== 0) {
+        \\        const current = work.indexes[depth - 1];
+        \\        let result;
+        \\        try {
+        \\          result = _inner(current);
+        \\        } catch (error) {
+        \\          if (error !== NODE_MISSING) throw error;
+        \\          const child = _nodeMissing;
+        \\          if (child < 0 || child >= nodeCount)
+        \\            throw new RangeError("yuku: invalid AST buffer");
+        \\          if (work.states[child] !== 0)
+        \\            throw new RangeError("yuku: cyclic AST buffer");
+        \\          if (depth === work.indexes.length) work = _nodeWork = growNodeWork(work);
+        \\          work.indexes[depth] = child;
+        \\          work.states[child] = 1;
+        \\          depth++;
+        \\          continue;
+        \\        }
+        \\        _nodes[current] = result;
+        \\        work.states[current] = 0;
         \\
     );
     if (mode == .analyzer) try w.writeAll(
-        \\      if (result !== null && typeof result === "object" && !_nodeIndexes.has(result))
-        \\        _nodeIndexes.set(result, current);
+        \\        if (result !== null && typeof result === "object" &&
+        \\            !_nodeIndexes.has(result)) _nodeIndexes.set(result, current);
         \\
     );
     try w.writeAll(
-        \\      depth--;
+        \\        depth--;
+        \\      }
+        \\      _nodeNext++;
         \\    }
-        \\    return _nodes[i];
+        \\    const result = _nodes[i];
+        \\    if (!_memoize) {
+        \\      _nodes = undefined; _nodeWork = undefined; _nodeNext = 0;
+        \\    }
+        \\    return result;
         \\  }
         \\
     );
@@ -833,6 +837,7 @@ pub fn generateWalkTables(w: *Writer) !void {
 
 fn writeChildTables(w: *Writer, mode: Mode) !void {
     @setEvalBranchQuota(1_000_000);
+    if (mode == .parser) return;
     // kind 0 is a NodeIndex, kind 1 a range with its length in slot+1
     try w.writeAll("const CHILD_SLOTS = [\n");
     inline for (@typeInfo(ast.NodeData).@"union".fields) |field| {
@@ -858,17 +863,15 @@ fn writeChildTables(w: *Writer, mode: Mode) !void {
     }
     try w.writeAll("];\n");
 
-    if (mode == .analyzer) {
-        try w.writeAll("const IS_NODE = [\n");
-        inline for (@typeInfo(ast.NodeData).@"union".fields) |field| {
-            const materialized = comptime if (specialChildKeysOf(field.name)) |entry|
-                entry.types.len != 0
-            else
-                true;
-            try w.print("  {},\n", .{materialized});
-        }
-        try w.writeAll("];\n");
+    try w.writeAll("const IS_NODE = [\n");
+    inline for (@typeInfo(ast.NodeData).@"union".fields) |field| {
+        const materialized = comptime if (specialChildKeysOf(field.name)) |entry|
+            entry.types.len != 0
+        else
+            true;
+        try w.print("  {},\n", .{materialized});
     }
+    try w.writeAll("];\n");
 }
 
 fn isIdentChar(c: u8) bool {
@@ -1578,7 +1581,7 @@ fn writeDecodeBody(w: *Writer, mode: Mode) !void {
         \\  let _program, _diagnostics, _comments, _tokens;
         \\  return {
         \\    get program() {
-        \\      return _program !== undefined ? _program : (_program = node(progIdx));
+        \\      return _program !== undefined ? _program : (_program = materialize(progIdx));
         \\    },
         \\    get tokens() {
         \\      // the list closes with eof, which is not a token of the source
@@ -1602,7 +1605,7 @@ fn writeDecodeBody(w: *Writer, mode: Mode) !void {
 
     if (mode == .analyzer) {
         try w.writeAll(
-            \\    nodeOf: node,
+            \\    nodeOf: materialize,
             \\    indexOf: (n) => _nodeIndexes.get(n),
             \\    parentIndex: (i) => _parents()[i],
             \\    startOf, endOf, str,
@@ -1747,7 +1750,7 @@ fn writeSemanticAccessors(w: *Writer) !void {
         \\        count: scopeCount,
         \\        kind: (i) => SCOPE_KINDS[{[bits]s} & {[kmask]d}],
         \\        strict: (i) => (({[bits]s} >> {[strict]d}) & 1) !== 0,
-        \\        node: (i) => node({[n]s}),
+        \\        node: (i) => materialize({[n]s}),
         \\        nodeIndex: (i) => {[n]s},
         \\        parentId: (i) => _id({[p]s}),
         \\        hoistTargetId: (i) => {[h]s},
@@ -1770,7 +1773,7 @@ fn writeSemanticAccessors(w: *Writer) !void {
         \\        flags: (i) => {[flags]s},
         \\        scopeId: (i) => {[scope]s},
         \\        declCount: (i) => {[dlen]s},
-        \\        declNode: (i, j) => node(declNodes[{[dstart]s} + j]),
+        \\        declNode: (i, j) => materialize(declNodes[{[dstart]s} + j]),
         \\        declNodeIndex: (i, j) => declNodes[{[dstart]s} + j],
         \\      }},
         \\
@@ -1786,7 +1789,7 @@ fn writeSemanticAccessors(w: *Writer) !void {
         \\        count: referenceCount,
         \\        name: (i) => {[name]s},
         \\        scopeId: (i) => {[scope]s},
-        \\        node: (i) => node({[n]s}),
+        \\        node: (i) => materialize({[n]s}),
         \\        nodeIndex: (i) => {[n]s},
         \\        space: (i) => REFERENCE_SPACES[({[bits]s} >> {[sshift]d}) & {[smask]d}],
         \\        inTypePosition: (i) =>
@@ -1819,7 +1822,7 @@ fn writeSemanticAccessors(w: *Writer) !void {
         \\          ({[bits]s} >> {[hpbit]d}) & 1
         \\            ? IMPORT_PHASES[({[bits]s} >> {[pbit]d}) & 1]
         \\            : null,
-        \\        node: (i) => node({[n]s}),
+        \\        node: (i) => materialize({[n]s}),
         \\      }},
         \\
     , .{
@@ -1842,7 +1845,7 @@ fn writeSemanticAccessors(w: *Writer) !void {
         \\        fromName: (i) => {[fname]s},
         \\        specifier: (i) => {[spec]s},
         \\        symbolId: (i) => _id({[sym]s}),
-        \\        node: (i) => node({[n]s}),
+        \\        node: (i) => materialize({[n]s}),
         \\      }},
         \\      moduleFlags: {{
         \\        usesRequire: (moduleFlags & {[require]d}) !== 0,
