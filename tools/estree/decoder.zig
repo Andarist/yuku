@@ -517,7 +517,6 @@ fn writeNodeFunction(w: *Writer, mode: Mode) !void {
         \\      default: throw new RangeError("yuku: invalid AST buffer");
         \\    }
         \\  }
-        \\  const _inner = _attached ? nodeWithComments : _decode;
         \\  let _nodes, _nodeWork;
         \\
     );
@@ -528,14 +527,13 @@ fn writeNodeFunction(w: *Writer, mode: Mode) !void {
         \\
     );
     try w.print(
-        \\  const NODE_MISSING = {{}};
         \\  const NODE_WORK_CAPACITY_INITIAL = {[capacity]d};
-        \\  let _nodeMissing = 0, _nodeNext = 0;
+        \\  let _nodeMissing = NULL, _nodeNext = 0;
         \\  function node(i) {{
         \\    const result = _nodes[i];
         \\    if (result !== undefined) return result;
-        \\    _nodeMissing = i;
-        \\    throw NODE_MISSING;
+        \\    if (_nodeMissing === NULL) _nodeMissing = i;
+        \\    return undefined;
         \\  }}
         \\  function growNodeWork(work) {{
         \\    const capacity = Math.min(work.indexes.length * 2, nodeCount);
@@ -554,17 +552,21 @@ fn writeNodeFunction(w: *Writer, mode: Mode) !void {
         \\
     , .{
         .capacity = node_work_capacity_initial,
-        .nodes = if (mode == .parser) "[]" else "Array.from({ length: nodeCount })",
+        .nodes = if (mode == .parser)
+            "new Array(nodeCount)"
+        else
+            "Array.from({ length: nodeCount })",
     });
     try w.writeAll(
         \\    const end = i + 1;
         \\    while (_nodeNext < end) {
-        \\      try {
-        \\        while (_nodeNext < end) {
-        \\          const current = _nodeNext;
-        \\          if (_nodes[current] === undefined) {
-        \\            const result = _inner(current);
-        \\            _nodes[current] = result;
+        \\      _nodeMissing = NULL;
+        \\      while (_nodeNext < end) {
+        \\        const current = _nodeNext;
+        \\        if (_nodes[current] === undefined) {
+        \\          const result = _attached ? nodeWithComments(current) : _decode(current);
+        \\          if (_nodeMissing !== NULL) break;
+        \\          _nodes[current] = result;
         \\
     );
     if (mode == .analyzer) try w.writeAll(
@@ -573,13 +575,10 @@ fn writeNodeFunction(w: *Writer, mode: Mode) !void {
         \\
     );
     try w.writeAll(
-        \\          }
-        \\          _nodeNext++;
-        \\        }
-        \\        continue;
-        \\      } catch (error) {
-        \\        if (error !== NODE_MISSING) throw error;
         \\      }
+        \\        _nodeNext++;
+        \\      }
+        \\      if (_nodeMissing === NULL) continue;
         \\      let work = _nodeWork;
         \\      if (work === undefined) {
         \\        const capacity = Math.min(nodeCount, NODE_WORK_CAPACITY_INITIAL);
@@ -594,11 +593,9 @@ fn writeNodeFunction(w: *Writer, mode: Mode) !void {
         \\      work.states[start] = 1;
         \\      while (depth !== 0) {
         \\        const current = work.indexes[depth - 1];
-        \\        let result;
-        \\        try {
-        \\          result = _inner(current);
-        \\        } catch (error) {
-        \\          if (error !== NODE_MISSING) throw error;
+        \\        _nodeMissing = NULL;
+        \\        const result = _attached ? nodeWithComments(current) : _decode(current);
+        \\        if (_nodeMissing !== NULL) {
         \\          const child = _nodeMissing;
         \\          if (child < 0 || child >= nodeCount)
         \\            throw new RangeError("yuku: invalid AST buffer");
