@@ -18,3 +18,7 @@ enum Color { Red, Green = "g" }
 namespace NS { export const v: Point = { x: 1 }; }
 const fn = async <T,>(arg: T): Promise<T> => arg;
 `;
+
+export const deepCalls = 5_000;
+export const deepSource = `chain${".concat(chain)".repeat(deepCalls)};`;
+export const deepAnalyzerSource = `chain${".concat(chain)".repeat(512)};`;

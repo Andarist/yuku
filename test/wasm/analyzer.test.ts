@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { analyze } from "../../npm/yuku-analyzer-wasm/index.js";
-import { jsSource, tsSource } from "./sources";
+import { deepAnalyzerSource, jsSource, tsSource } from "./sources";
 
 describe("@yuku-analyzer/wasm", () => {
   test("resolves symbols and references for JS", () => {
@@ -43,5 +43,15 @@ describe("@yuku-analyzer/wasm", () => {
   test("handles non-ASCII sources", () => {
     const mod = analyze(`const emoji = "🎉héllo"; const após = emoji;`, { path: "input.js" });
     expect(mod.symbols.map((s) => s.name)).toEqual(["emoji", "após"]);
+  });
+
+  test("materializes and indexes parents through the iterative decoder fallback", () => {
+    // force the fallback, then build the structural parent index iteratively
+    const mod = analyze(deepAnalyzerSource, { path: "input.js" });
+    const statement = mod.ast.body[0];
+    if (statement?.type !== "ExpressionStatement") {
+      throw new Error("expected an expression statement");
+    }
+    expect(mod.parentOf(statement.expression)?.type).toBe("ExpressionStatement");
   });
 });

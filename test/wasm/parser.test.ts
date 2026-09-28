@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { parse } from "../../npm/yuku-parser-wasm/index.js";
-import { jsSource, tsSource } from "./sources";
+import { deepCalls, deepSource, jsSource, tsSource } from "./sources";
 
 describe("@yuku-parser/wasm", () => {
   test("parses JS with the documented AST shape", () => {
@@ -71,5 +71,26 @@ describe("@yuku-parser/wasm", () => {
     const literal = first.declarations[0]?.init;
     if (literal?.type !== "Literal") throw new Error("expected a Literal init");
     expect(literal.value).toBe("🎉héllo");
+  });
+
+  test("materializes an AST deeper than the JavaScript stack", () => {
+    // force the fallback and verify the complete left-associated shape without recursion
+    const { program } = parse(deepSource, { lang: "js" });
+    const statement = program.body[0];
+    if (statement?.type !== "ExpressionStatement") {
+      throw new Error("expected an expression statement");
+    }
+
+    let expression = statement.expression;
+    for (let call = 0; call < deepCalls; call++) {
+      if (expression.type !== "CallExpression") {
+        throw new Error(`expected call ${call + 1}`);
+      }
+      if (expression.callee.type !== "MemberExpression") {
+        throw new Error(`expected member callee ${call + 1}`);
+      }
+      expression = expression.callee.object;
+    }
+    expect(expression).toMatchObject({ type: "Identifier", name: "chain" });
   });
 });

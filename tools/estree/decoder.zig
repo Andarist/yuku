@@ -26,7 +26,7 @@ pub fn generate(w: *Writer, mode: Mode) Writer.Error!void {
     try writeTokenTables(w);
     try writeTokenList(w);
     if (mode == .analyzer) try writeSemanticConstants(w);
-    try writeChildTables(w);
+    try writeChildTables(w, mode);
     try writeBuildPosMap(w);
     try writeDecodeOpen(w);
     try writeNodeFunction(w, mode);
@@ -313,8 +313,12 @@ fn writeBuildPosMap(w: *Writer) !void {
 }
 
 fn writeDecodeOpen(w: *Writer) !void {
+    const diagnostic_size_min: u32 = 1 + 4 + 4 + 4 + 1 + 4;
+    comptime std.debug.assert(diagnostic_size_min == 18);
     try w.print(
         \\function decode(buffer, source) {{
+        \\  if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < {[hdr]d})
+        \\    throw new RangeError("yuku: invalid AST buffer");
         \\  const _u8 = new Uint8Array(buffer);
         \\  const _u32 = new Int32Array(buffer, 0, buffer.byteLength >> 2);
         \\  const _src = source;
@@ -332,13 +336,26 @@ fn writeDecodeOpen(w: *Writer) !void {
         \\  const _attached = !!(_flags & {[ac]d});
         \\  const _firstNa = _u32[{[u_fna]d}];
         \\  const _nodesOff = {[hdr]d};
-        \\  const eOff = _nodesOff + nodeCount * {[size]d};
+        \\  const _nodeSize = {[size]d};
+        \\  if (nodeCount <= 0 || extraCount < 0 || spLen < 0 || commentCount < 0 ||
+        \\      diagCount < 0 || attachedCommentCount < 0 || tokenCount < 0 ||
+        \\      progIdx < 0 || progIdx >= nodeCount || _srcLen < 0 ||
+        \\      _firstNa < 0 || _firstNa > _srcLen)
+        \\    throw new RangeError("yuku: invalid AST buffer");
+        \\  const eOff = _nodesOff + nodeCount * _nodeSize;
         \\  const _extraBase = eOff >> 2;
         \\  const _spOff = eOff + extraCount * 4;
-        \\  const _aoOff = _spOff + ((spLen + 3) & ~3);
+        \\  const _aoOff = _spOff + Math.ceil(spLen / 4) * 4;
         \\  const _acOff = _attached ? _aoOff + (nodeCount + 1) * 4 : _aoOff;
         \\  const _cOff = _acOff + attachedCommentCount * {[acsize]d};
         \\  const _tOff = _cOff + commentCount * {[csize]d};
+        \\  const dOff = _tOff + tokenCount * {[tsize]d};
+        \\  const dEndMin = dOff + diagCount * {[dsize]d};
+        \\  if (eOff > buffer.byteLength || _spOff > buffer.byteLength ||
+        \\      _aoOff > buffer.byteLength || _acOff > buffer.byteLength ||
+        \\      _cOff > buffer.byteLength || _tOff > buffer.byteLength ||
+        \\      dOff > buffer.byteLength || dEndMin > buffer.byteLength)
+        \\    throw new RangeError("yuku: invalid AST buffer");
         \\  function _poolDecode(s, e) {{
         \\    const a = _spOff + s - _srcLen, b = _spOff + e - _srcLen;
         \\    let hasEd = false;
@@ -376,15 +393,21 @@ fn writeDecodeOpen(w: *Writer) !void {
         \\    if (e <= _firstNa) return _src.slice(s, e);
         \\    return _src.slice(s < _firstNa ? s : pm[s - _firstNa], pm[e - _firstNa]);
         \\  }};
+        \\  function extraRange(s, len) {{
+        \\    if (s < 0 || len < 0 || s + len > extraCount)
+        \\      throw new RangeError("yuku: invalid AST buffer");
+        \\    return _extraBase + s;
+        \\  }}
         \\  function nodeArr(s, len) {{
         \\    const r = new Array(len);
-        \\    const base = _extraBase + s;
+        \\    const base = extraRange(s, len);
         \\    for (let j = 0; j < len; j++) r[j] = node(_u32[base + j]);
         \\    return r;
         \\  }}
         \\  function nodeArrHoles(s, len) {{
         \\    const r = new Array(len);
-        \\    for (let j = 0, base = _extraBase + s; j < len; j++) {{
+        \\    const base = extraRange(s, len);
+        \\    for (let j = 0; j < len; j++) {{
         \\      const x = _u32[base + j];
         \\      r[j] = x !== NULL ? node(x) : null;
         \\    }}
@@ -395,7 +418,8 @@ fn writeDecodeOpen(w: *Writer) !void {
         \\    const len = _u32[pb + {[items_len]d}];
         \\    const iStart = _u32[pb + {[items]d}], rest = _u32[pb + {[rest]d}];
         \\    const p = new Array(rest !== NULL ? len + 1 : len);
-        \\    for (let j = 0, base = _extraBase + iStart; j < len; j++) p[j] = node(_u32[base + j]);
+        \\    const base = extraRange(iStart, len);
+        \\    for (let j = 0; j < len; j++) p[j] = node(_u32[base + j]);
         \\    if (rest !== NULL) p[len] = node(rest);
         \\    return p;
         \\  }}
@@ -418,6 +442,8 @@ fn writeDecodeOpen(w: *Writer) !void {
         .size = rt.NODE_SIZE,
         .acsize = rt.ATTACHED_COMMENT_SIZE,
         .csize = rt.COMMENT_SIZE,
+        .tsize = rt.TOKEN_SIZE,
+        .dsize = diagnostic_size_min,
         .stride = rt.NODE_SIZE / 4,
         .hdr_u32 = rt.HEADER_SIZE / 4,
         .items = comptime u32IndexOf(ast.FormalParameters, "items"),
@@ -435,6 +461,9 @@ fn u16At(comptime word: []const u8, comptime byte_in_word: u8) []const u8 {
 
 fn writeNodeFunction(w: *Writer, mode: Mode) !void {
     comptime std.debug.assert(rt.NODE_FLAGS_OFFSET / 4 == 0);
+    const node_depth_max: u32 = 64;
+    comptime std.debug.assert(node_depth_max > 0);
+    comptime std.debug.assert(node_depth_max < 1024);
     const flags_expr = comptime u16At("h0", rt.NODE_FLAGS_OFFSET % 4);
     comptime std.debug.assert(rt.ATTACHED_COMMENT_FLAGS_OFFSET == 0);
     comptime std.debug.assert(rt.ATTACHED_COMMENT_SIZE % 4 == 0);
@@ -485,70 +514,108 @@ fn writeNodeFunction(w: *Writer, mode: Mode) !void {
     });
     try writeNodeCases(w);
     try w.writeAll(
+        \\      default: throw new RangeError("yuku: invalid AST buffer");
         \\    }
         \\  }
         \\  const _inner = _attached ? nodeWithComments : _decode;
-        \\  const _nodes = Array.from({ length: nodeCount });
-        \\  const _nodeStates = new Uint8Array(nodeCount);
-        \\  const _nodeIndexesWork = new Uint32Array(nodeCount);
-        \\  const _nodeOperationsWork = new Uint32Array(nodeCount);
-        \\  const _nodeItemsWork = new Uint32Array(nodeCount);
+        \\  let _nodes, _nodeWork;
+        \\  let _nodeDepth = 0;
         \\
     );
+    if (mode == .parser) try w.writeAll("  const _memoize = false;\n");
     if (mode == .analyzer) try w.writeAll(
+        \\  const _memoize = true;
         \\  const _nodeIndexes = new WeakMap();
         \\
     );
     try w.print(
         \\  function node(i) {{
-        \\    if (_nodeStates[i] === 2) return _nodes[i];
-        \\    if (_nodeStates[i] !== 0) throw new RangeError("yuku: cyclic AST buffer");
+        \\    if (i < 0 || i >= nodeCount)
+        \\      throw new RangeError("yuku: invalid AST buffer");
+        \\    if (_memoize && _nodes === undefined) _nodes = Array.from({{ length: nodeCount }});
+        \\    if (_nodes !== undefined) {{
+        \\      const cached = _nodes[i];
+        \\      if (cached !== undefined) return cached;
+        \\    }}
+        \\    if (_nodeDepth === {[depth]d}) return nodeDeep(i);
+        \\    _nodeDepth++;
+        \\    const result = _inner(i);
+        \\    _nodeDepth--;
+        \\    if (_memoize) _nodes[i] = result;
+        \\
+    , .{ .depth = node_depth_max });
+    if (mode == .analyzer) try w.writeAll(
+        \\    if (result !== null && typeof result === "object" && !_nodeIndexes.has(result))
+        \\      _nodeIndexes.set(result, i);
+        \\
+    );
+    try w.writeAll(
+        \\    if (!_memoize && _nodeDepth === 0) _nodes = undefined;
+        \\    if (_nodeDepth === 0) _nodeWork = undefined;
+        \\    return result;
+        \\  }
+        \\  function nodeDeep(i) {
+        \\    if (_nodes === undefined) _nodes = Array.from({ length: nodeCount });
+        \\    const work = _nodeWork ??= {
+        \\      indexes: new Uint32Array(nodeCount),
+        \\      operations: new Uint8Array(nodeCount),
+        \\      items: new Uint32Array(nodeCount),
+        \\      states: new Uint8Array(nodeCount),
+        \\    };
         \\    let depth = 1;
-        \\    _nodeIndexesWork[0] = i;
-        \\    _nodeOperationsWork[0] = 0;
-        \\    _nodeItemsWork[0] = 0;
-        \\    _nodeStates[i] = 1;
-        \\    while (depth !== 0) {{
+        \\    work.indexes[0] = i;
+        \\    work.operations[0] = 0;
+        \\    work.items[0] = 0;
+        \\    work.states[i] = 1;
+        \\    while (depth !== 0) {
         \\      const frame = depth - 1;
-        \\      const current = _nodeIndexesWork[frame];
-        \\      const offset = _nodesOff + current * {[size]d};
-        \\      const childOperations = CHILD_SLOTS[_u8[offset]];
-        \\      const operation = _nodeOperationsWork[frame];
-        \\      if (operation < childOperations.length) {{
+        \\      const current = work.indexes[frame];
+        \\      const offset = _nodesOff + current * _nodeSize;
+        \\      const tag = _u8[offset];
+        \\      if (tag >= CHILD_SLOTS.length) throw new RangeError("yuku: invalid AST buffer");
+        \\      const childOperations = CHILD_SLOTS[tag];
+        \\      const operation = work.operations[frame];
+        \\      if (operation < childOperations.length) {
         \\        const kind = childOperations[operation];
         \\        const slot = childOperations[operation + 1];
         \\        const base = offset >> 2;
         \\        let child;
-        \\        if (kind === 0) {{
-        \\          _nodeOperationsWork[frame] = operation + 2;
+        \\        if (kind === 0) {
+        \\          work.operations[frame] = operation + 2;
         \\          child = _u32[base + slot];
-        \\        }} else {{
-        \\          const item = _nodeItemsWork[frame];
+        \\        } else {
+        \\          const item = work.items[frame];
+        \\          const start = _u32[base + slot];
         \\          const length = _u32[base + slot + 1];
-        \\          if (item < length) {{
-        \\            _nodeItemsWork[frame] = item + 1;
-        \\            child = _u32[_extraBase + _u32[base + slot] + item];
-        \\          }} else {{
-        \\            _nodeOperationsWork[frame] = operation + 2;
-        \\            _nodeItemsWork[frame] = 0;
+        \\          const extraBase = extraRange(start, length);
+        \\          if (item < length) {
+        \\            work.items[frame] = item + 1;
+        \\            child = _u32[extraBase + item];
+        \\          } else {
+        \\            work.operations[frame] = operation + 2;
+        \\            work.items[frame] = 0;
         \\            continue;
-        \\          }}
-        \\        }}
-        \\        if (child === NULL || _nodeStates[child] === 2) continue;
-        \\        if (_nodeStates[child] !== 0) throw new RangeError("yuku: cyclic AST buffer");
+        \\          }
+        \\        }
+        \\        if (child === NULL) continue;
+        \\        if (child < 0 || child >= nodeCount)
+        \\          throw new RangeError("yuku: invalid AST buffer");
+        \\        if (_nodes[child] !== undefined) continue;
+        \\        if (work.states[child] !== 0)
+        \\          throw new RangeError("yuku: cyclic AST buffer");
         \\        if (depth === nodeCount) throw new RangeError("yuku: invalid AST buffer");
-        \\        _nodeIndexesWork[depth] = child;
-        \\        _nodeOperationsWork[depth] = 0;
-        \\        _nodeItemsWork[depth] = 0;
-        \\        _nodeStates[child] = 1;
+        \\        work.indexes[depth] = child;
+        \\        work.operations[depth] = 0;
+        \\        work.items[depth] = 0;
+        \\        work.states[child] = 1;
         \\        depth++;
         \\        continue;
-        \\      }}
+        \\      }
         \\      const result = _inner(current);
         \\      _nodes[current] = result;
-        \\      _nodeStates[current] = 2;
+        \\      work.states[current] = 2;
         \\
-    , .{ .size = rt.NODE_SIZE });
+    );
     if (mode == .analyzer) try w.writeAll(
         \\      if (result !== null && typeof result === "object" && !_nodeIndexes.has(result))
         \\        _nodeIndexes.set(result, current);
@@ -764,7 +831,7 @@ pub fn generateWalkTables(w: *Writer) !void {
     );
 }
 
-fn writeChildTables(w: *Writer) !void {
+fn writeChildTables(w: *Writer, mode: Mode) !void {
     @setEvalBranchQuota(1_000_000);
     // kind 0 is a NodeIndex, kind 1 a range with its length in slot+1
     try w.writeAll("const CHILD_SLOTS = [\n");
@@ -772,6 +839,7 @@ fn writeChildTables(w: *Writer) !void {
         try w.writeAll("  [");
         if (@typeInfo(field.type) == .@"struct") {
             comptime var first = true;
+            comptime var child_slots_len = 0;
             inline for (std.meta.fields(field.type), 0..) |f, i| {
                 if (f.type == ast.NodeIndex or f.type == ast.IndexRange) {
                     if (!first) try w.writeAll(", ");
@@ -781,22 +849,26 @@ fn writeChildTables(w: *Writer) !void {
                         comptime rt.u32SlotForField(field.type, i) + rt.NODE_HEADER_U32S,
                     });
                     first = false;
+                    child_slots_len += 2;
                 }
             }
+            comptime std.debug.assert(child_slots_len <= std.math.maxInt(u8));
         }
         try w.writeAll("],\n");
     }
     try w.writeAll("];\n");
 
-    try w.writeAll("const IS_NODE = [\n");
-    inline for (@typeInfo(ast.NodeData).@"union".fields) |field| {
-        const materialized = comptime if (specialChildKeysOf(field.name)) |entry|
-            entry.types.len != 0
-        else
-            true;
-        try w.print("  {},\n", .{materialized});
+    if (mode == .analyzer) {
+        try w.writeAll("const IS_NODE = [\n");
+        inline for (@typeInfo(ast.NodeData).@"union".fields) |field| {
+            const materialized = comptime if (specialChildKeysOf(field.name)) |entry|
+                entry.types.len != 0
+            else
+                true;
+            try w.print("  {},\n", .{materialized});
+        }
+        try w.writeAll("];\n");
     }
-    try w.writeAll("];\n");
 }
 
 fn isIdentChar(c: u8) bool {
@@ -1439,7 +1511,6 @@ fn writeDecodeBody(w: *Writer, mode: Mode) !void {
     comptime std.debug.assert(rt.COMMENT_FLAGS_OFFSET == 0);
     comptime std.debug.assert(rt.COMMENT_SIZE % 4 == 0);
     try w.print(
-        \\  const dOff = _tOff + tokenCount * {[tsize]d};
         \\  function _decodeComments() {{
         \\    const out = new Array(commentCount);
         \\    for (let j = 0; j < commentCount; j++) {{
@@ -1491,7 +1562,6 @@ fn writeDecodeBody(w: *Writer, mode: Mode) !void {
         \\  }}
         \\
     , .{
-        .tsize = rt.TOKEN_SIZE,
         .c_stride = rt.COMMENT_SIZE / 4,
         .c_vs = rt.COMMENT_VALUE_START_OFFSET / 4,
         .c_ve = rt.COMMENT_VALUE_END_OFFSET / 4,
@@ -1553,27 +1623,49 @@ fn writeParentBody(w: *Writer) !void {
         \\  let _parentArr;
         \\  function _parents() {{
         \\    if (_parentArr !== undefined) return _parentArr;
-        \\    const p = new Int32Array(nodeCount).fill(-1);
-        \\    (function visit(i, parent) {{
+        \\    const p = new Int32Array(nodeCount).fill(-2);
+        \\    const indexes = new Uint32Array(nodeCount);
+        \\    let length = 1;
+        \\    indexes[0] = progIdx;
+        \\    p[progIdx] = -1;
+        \\    while (length !== 0) {{
+        \\      length--;
+        \\      const i = indexes[length];
+        \\      let parent = p[i];
         \\      const o = _nodesOff + i * {[size]d};
         \\      const tag = _u8[o];
+        \\      if (tag >= CHILD_SLOTS.length) throw new RangeError("yuku: invalid AST buffer");
         \\      if (IS_NODE[tag]) {{ p[i] = parent; parent = i; }}
         \\      const ops = CHILD_SLOTS[tag];
         \\      const b = o >> 2;
-        \\      for (let q = 0; q < ops.length; q += 2) {{
+        \\      for (let q = ops.length - 2; q >= 0; q -= 2) {{
         \\        const slot = ops[q + 1];
         \\        if (ops[q] === 0) {{
         \\          const c = _u32[b + slot];
-        \\          if (c !== NULL) visit(c, parent);
+        \\          if (c === NULL) continue;
+        \\          if (c < 0 || c >= nodeCount) throw new RangeError("yuku: invalid AST buffer");
+        \\          if (p[c] !== -2) continue;
+        \\          if (length === nodeCount) throw new RangeError("yuku: invalid AST buffer");
+        \\          p[c] = parent;
+        \\          indexes[length] = c;
+        \\          length++;
         \\        }} else {{
         \\          const s = _u32[b + slot], len = _u32[b + slot + 1];
-        \\          for (let j = 0; j < len; j++) {{
-        \\            const c = _u32[_extraBase + s + j];
-        \\            if (c !== NULL) visit(c, parent);
+        \\          const base = extraRange(s, len);
+        \\          for (let j = len; j > 0; j--) {{
+        \\            const c = _u32[base + j - 1];
+        \\            if (c === NULL) continue;
+        \\            if (c < 0 || c >= nodeCount)
+        \\              throw new RangeError("yuku: invalid AST buffer");
+        \\            if (p[c] !== -2) continue;
+        \\            if (length === nodeCount) throw new RangeError("yuku: invalid AST buffer");
+        \\            p[c] = parent;
+        \\            indexes[length] = c;
+        \\            length++;
         \\          }}
         \\        }}
         \\      }}
-        \\    }})(progIdx, -1);
+        \\    }}
         \\    return (_parentArr = p);
         \\  }}
         \\
