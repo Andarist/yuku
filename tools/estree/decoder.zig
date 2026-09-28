@@ -26,7 +26,7 @@ pub fn generate(w: *Writer, mode: Mode) Writer.Error!void {
     try writeTokenTables(w);
     try writeTokenList(w);
     if (mode == .analyzer) try writeSemanticConstants(w);
-    if (mode == .analyzer) try writeChildTables(w);
+    try writeChildTables(w);
     try writeBuildPosMap(w);
     try writeDecodeOpen(w);
     try writeNodeFunction(w, mode);
@@ -484,31 +484,83 @@ fn writeNodeFunction(w: *Writer, mode: Mode) !void {
         .se = rt.NODE_SPAN_END_U32,
     });
     try writeNodeCases(w);
-    switch (mode) {
-        .parser => try w.writeAll(
-            \\    }
-            \\  }
-            \\  const node = _attached ? nodeWithComments : _decode;
-            \\
-        ),
-        .analyzer => try w.writeAll(
-            \\    }
-            \\  }
-            \\  const _inner = _attached ? nodeWithComments : _decode;
-            \\  const _nodes = Array.from({ length: nodeCount });
-            \\  const _nodeIndexes = new WeakMap();
-            \\  function node(i) {
-            \\    const m = _nodes[i];
-            \\    if (m !== undefined) return m;
-            \\    const r = _inner(i);
-            \\    _nodes[i] = r;
-            \\    if (r !== null && typeof r === "object" && !_nodeIndexes.has(r))
-            \\      _nodeIndexes.set(r, i);
-            \\    return r;
-            \\  }
-            \\
-        ),
-    }
+    try w.writeAll(
+        \\    }
+        \\  }
+        \\  const _inner = _attached ? nodeWithComments : _decode;
+        \\  const _nodes = Array.from({ length: nodeCount });
+        \\  const _nodeStates = new Uint8Array(nodeCount);
+        \\  const _nodeIndexesWork = new Uint32Array(nodeCount);
+        \\  const _nodeOperationsWork = new Uint32Array(nodeCount);
+        \\  const _nodeItemsWork = new Uint32Array(nodeCount);
+        \\
+    );
+    if (mode == .analyzer) try w.writeAll(
+        \\  const _nodeIndexes = new WeakMap();
+        \\
+    );
+    try w.print(
+        \\  function node(i) {{
+        \\    if (_nodeStates[i] === 2) return _nodes[i];
+        \\    if (_nodeStates[i] !== 0) throw new RangeError("yuku: cyclic AST buffer");
+        \\    let depth = 1;
+        \\    _nodeIndexesWork[0] = i;
+        \\    _nodeOperationsWork[0] = 0;
+        \\    _nodeItemsWork[0] = 0;
+        \\    _nodeStates[i] = 1;
+        \\    while (depth !== 0) {{
+        \\      const frame = depth - 1;
+        \\      const current = _nodeIndexesWork[frame];
+        \\      const offset = _nodesOff + current * {[size]d};
+        \\      const childOperations = CHILD_SLOTS[_u8[offset]];
+        \\      const operation = _nodeOperationsWork[frame];
+        \\      if (operation < childOperations.length) {{
+        \\        const kind = childOperations[operation];
+        \\        const slot = childOperations[operation + 1];
+        \\        const base = offset >> 2;
+        \\        let child;
+        \\        if (kind === 0) {{
+        \\          _nodeOperationsWork[frame] = operation + 2;
+        \\          child = _u32[base + slot];
+        \\        }} else {{
+        \\          const item = _nodeItemsWork[frame];
+        \\          const length = _u32[base + slot + 1];
+        \\          if (item < length) {{
+        \\            _nodeItemsWork[frame] = item + 1;
+        \\            child = _u32[_extraBase + _u32[base + slot] + item];
+        \\          }} else {{
+        \\            _nodeOperationsWork[frame] = operation + 2;
+        \\            _nodeItemsWork[frame] = 0;
+        \\            continue;
+        \\          }}
+        \\        }}
+        \\        if (child === NULL || _nodeStates[child] === 2) continue;
+        \\        if (_nodeStates[child] !== 0) throw new RangeError("yuku: cyclic AST buffer");
+        \\        if (depth === nodeCount) throw new RangeError("yuku: invalid AST buffer");
+        \\        _nodeIndexesWork[depth] = child;
+        \\        _nodeOperationsWork[depth] = 0;
+        \\        _nodeItemsWork[depth] = 0;
+        \\        _nodeStates[child] = 1;
+        \\        depth++;
+        \\        continue;
+        \\      }}
+        \\      const result = _inner(current);
+        \\      _nodes[current] = result;
+        \\      _nodeStates[current] = 2;
+        \\
+    , .{ .size = rt.NODE_SIZE });
+    if (mode == .analyzer) try w.writeAll(
+        \\      if (result !== null && typeof result === "object" && !_nodeIndexes.has(result))
+        \\        _nodeIndexes.set(result, current);
+        \\
+    );
+    try w.writeAll(
+        \\      depth--;
+        \\    }
+        \\    return _nodes[i];
+        \\  }
+        \\
+    );
     if (mode == .analyzer) {
         try w.print(
             \\  const _nodesU32 = _nodesOff >> 2;
