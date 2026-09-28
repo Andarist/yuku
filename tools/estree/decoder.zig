@@ -520,9 +520,7 @@ fn writeNodeFunction(w: *Writer, mode: Mode) !void {
         \\  let _nodes, _nodeWork;
         \\
     );
-    if (mode == .parser) try w.writeAll("  const _memoize = false;\n");
     if (mode == .analyzer) try w.writeAll(
-        \\  const _memoize = true;
         \\  const _nodeIndexes = new WeakMap();
         \\
     );
@@ -552,10 +550,7 @@ fn writeNodeFunction(w: *Writer, mode: Mode) !void {
         \\
     , .{
         .capacity = node_work_capacity_initial,
-        .nodes = if (mode == .parser)
-            "new Array(nodeCount)"
-        else
-            "Array.from({ length: nodeCount })",
+        .nodes = "new Array(nodeCount)",
     });
     try w.writeAll(
         \\    const end = i + 1;
@@ -622,9 +617,11 @@ fn writeNodeFunction(w: *Writer, mode: Mode) !void {
         \\      _nodeNext++;
         \\    }
         \\    const result = _nodes[i];
-        \\    if (!_memoize) {
-        \\      _nodes = undefined; _nodeWork = undefined; _nodeNext = 0;
-        \\    }
+    );
+    if (mode == .parser) try w.writeAll(
+        \\    _nodes = undefined; _nodeWork = undefined; _nodeNext = 0;
+    );
+    try w.writeAll(
         \\    return result;
         \\  }
         \\
