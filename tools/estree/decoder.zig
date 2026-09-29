@@ -467,9 +467,9 @@ fn u16At(comptime word: []const u8, comptime byte_in_word: u8) []const u8 {
 
 fn writeNodeFunction(w: *Writer, mode: Mode) !void {
     comptime std.debug.assert(rt.NODE_FLAGS_OFFSET / 4 == 0);
-    const node_work_capacity_initial: u32 = 64;
-    comptime std.debug.assert(node_work_capacity_initial > 0);
-    comptime std.debug.assert(node_work_capacity_initial < 1024);
+    const node_stack_capacity_initial: u32 = 64;
+    comptime std.debug.assert(node_stack_capacity_initial > 0);
+    comptime std.debug.assert(node_stack_capacity_initial < 1024);
     const flags_expr = comptime u16At("h0", rt.NODE_FLAGS_OFFSET % 4);
     comptime std.debug.assert(rt.ATTACHED_COMMENT_FLAGS_OFFSET == 0);
     comptime std.debug.assert(rt.ATTACHED_COMMENT_SIZE % 4 == 0);
@@ -523,99 +523,83 @@ fn writeNodeFunction(w: *Writer, mode: Mode) !void {
         \\      default: throw new RangeError("yuku: invalid AST buffer");
         \\    }
         \\  }
-        \\  let _nodes, _nodeWork;
-        \\
-    );
-    if (mode == .analyzer) try w.writeAll(
-        \\  const _nodeIndexes = new WeakMap();
-        \\
-    );
-    const remember = if (mode == .analyzer)
-        \\        if (result !== null && typeof result === "object" &&
-        \\            !_nodeIndexes.has(result)) _nodeIndexes.set(result, current);
-        \\
-    else
-        "";
-    try w.print(
-        \\  const NODE_WORK_CAPACITY_INITIAL = {[capacity]d};
+        \\  let _nodes, _nodeStack, _nodeOnPath;
         \\  let _nodeMissing = NULL, _nodeNext = 0;
-        \\  const _decodeNode = _attached ? nodeWithComments : _decode;
-        \\  function nodeMiss(i) {{
+        \\  function nodeMiss(i) {
         \\    _nodeMissing = i;
         \\    return undefined;
-        \\  }}
-        \\  function growNodeWork(work) {{
-        \\    // every push consumes one child edge, so a valid buffer never needs more
-        \\    const capacity_max = nodeCount * CHILD_DIRECT_MAX + extraCount + 1;
-        \\    const capacity = Math.min(work.indexes.length * 2, capacity_max);
-        \\    if (capacity <= work.indexes.length)
-        \\      throw new RangeError("yuku: invalid AST buffer");
-        \\    const indexes = new Uint32Array(capacity);
-        \\    indexes.set(work.indexes);
-        \\    return {{ indexes, states: work.states }};
-        \\  }}
-        \\  function pushNodeWork(child, depth) {{
-        \\    if (child < 0 || child >= nodeCount)
-        \\      throw new RangeError("yuku: invalid AST buffer");
-        \\    if (_nodes[child] !== undefined) return depth;
-        \\    const states = _nodeWork.states;
-        \\    // 2 marks an ancestor still waiting on its children, 1 a node queued elsewhere
-        \\    // on the stack (a child shared by two parents), which is pushed again so it is
-        \\    // decoded before the parent that needs it now
-        \\    if (states[child] === 2) throw new RangeError("yuku: cyclic AST buffer");
-        \\    states[child] = 1;
-        \\    if (depth === _nodeWork.indexes.length) _nodeWork = growNodeWork(_nodeWork);
-        \\    _nodeWork.indexes[depth] = child;
-        \\    return depth + 1;
-        \\  }}
+        \\  }
+        \\
+    );
+    switch (mode) {
+        .parser => try w.writeAll(
+            \\  const _decodeNode = _attached ? nodeWithComments : _decode;
+            \\
+        ),
+        .analyzer => try w.writeAll(
+            \\  const _inner = _attached ? nodeWithComments : _decode;
+            \\  const _nodeIndexes = new WeakMap();
+            \\  function _decodeNode(i) {
+            \\    const r = _inner(i);
+            \\    if (_nodeMissing === NULL && r !== null && typeof r === "object" &&
+            \\        !_nodeIndexes.has(r)) _nodeIndexes.set(r, i);
+            \\    return r;
+            \\  }
+            \\
+        ),
+    }
+    try w.print(
         \\  function materializeSubtree(root) {{
-        \\    // decodes the undecoded nodes under root in post order, so every child a decode
-        \\    // reads is already cached and no node is decoded more than once
-        \\    if (_nodeWork === undefined) {{
-        \\      _nodeWork = {{
-        \\        indexes: new Uint32Array(Math.min(nodeCount, NODE_WORK_CAPACITY_INITIAL)),
-        \\        states: new Uint8Array(nodeCount),
-        \\      }};
+        \\    // a node is expanded when first popped and decoded when popped again after its
+        \\    // children, so every node under root is decoded once with its children cached,
+        \\    // pushes are bounded by the child edges, and a child still on the path is a cycle
+        \\    if (_nodeStack === undefined) {{
+        \\      _nodeStack = new Uint32Array({[capacity]d});
+        \\      _nodeOnPath = new Uint8Array(nodeCount);
         \\    }}
-        \\    let depth = pushNodeWork(root, 0);
+        \\    let depth = 1;
+        \\    _nodeStack[0] = root;
         \\    while (depth !== 0) {{
-        \\      const current = _nodeWork.indexes[depth - 1];
+        \\      const current = _nodeStack[depth - 1];
         \\      if (_nodes[current] !== undefined) {{
         \\        depth--;
         \\        continue;
         \\      }}
-        \\      const states = _nodeWork.states;
-        \\      if (states[current] === 1) {{
-        \\        states[current] = 2;
-        \\        const o = _nodesOff + current * {[size]d};
-        \\        const tag = _u8[o];
-        \\        if (tag >= CHILD_SLOTS.length) throw new RangeError("yuku: invalid AST buffer");
-        \\        const ops = CHILD_SLOTS[tag];
-        \\        const b = o >> 2;
-        \\        const depth_before = depth;
-        \\        for (let q = 0; q < ops.length; q += 2) {{
-        \\          const slot = ops[q + 1];
-        \\          if (ops[q] === 0) {{
-        \\            const c = _u32[b + slot];
-        \\            if (c !== NULL) depth = pushNodeWork(c, depth);
-        \\          }} else {{
-        \\            const s = _u32[b + slot], len = _u32[b + slot + 1];
-        \\            const base = extraRange(s, len);
-        \\            for (let j = 0; j < len; j++) {{
-        \\              const c = _u32[base + j];
-        \\              if (c !== NULL) depth = pushNodeWork(c, depth);
-        \\            }}
-        \\          }}
-        \\        }}
-        \\        if (depth !== depth_before) continue;
+        \\      if (_nodeOnPath[current] === 1) {{
+        \\        _nodeMissing = NULL;
+        \\        const result = _decodeNode(current);
+        \\        if (_nodeMissing !== NULL) throw new RangeError("yuku: invalid AST buffer");
+        \\        _nodes[current] = result;
+        \\        _nodeOnPath[current] = 0;
+        \\        depth--;
+        \\        continue;
         \\      }}
-        \\      _nodeMissing = NULL;
-        \\      const result = _decodeNode(current);
-        \\      // CHILD_SLOTS lists every child a decode reads, so nothing can be missing here
-        \\      if (_nodeMissing !== NULL) throw new RangeError("yuku: invalid AST buffer");
-        \\      _nodes[current] = result;
-        \\      states[current] = 0;
-        \\{[remember]s}      depth--;
+        \\      _nodeOnPath[current] = 1;
+        \\      const o = _nodesOff + current * {[size]d};
+        \\      const tag = _u8[o];
+        \\      if (tag >= CHILD_SLOTS.length) throw new RangeError("yuku: invalid AST buffer");
+        \\      const ops = CHILD_SLOTS[tag];
+        \\      for (let q = 0; q < ops.length; q += 2) {{
+        \\        let base = (o >> 2) + ops[q + 1], count = 1;
+        \\        if (ops[q] === 1) {{
+        \\          count = _u32[base + 1];
+        \\          base = extraRange(_u32[base], count);
+        \\        }}
+        \\        for (let j = 0; j < count; j++) {{
+        \\          const child = _u32[base + j];
+        \\          if (child === NULL || _nodes[child] !== undefined) continue;
+        \\          if (child < 0 || child >= nodeCount)
+        \\            throw new RangeError("yuku: invalid AST buffer");
+        \\          if (_nodeOnPath[child] === 1) throw new RangeError("yuku: cyclic AST buffer");
+        \\          if (depth === _nodeStack.length) {{
+        \\            const grown = new Uint32Array(depth * 2);
+        \\            grown.set(_nodeStack);
+        \\            _nodeStack = grown;
+        \\          }}
+        \\          _nodeStack[depth] = child;
+        \\          depth++;
+        \\        }}
+        \\      }}
         \\    }}
         \\  }}
         \\  function materialize(i) {{
@@ -635,7 +619,7 @@ fn writeNodeFunction(w: *Writer, mode: Mode) !void {
         \\        const result = _decodeNode(current);
         \\        if (_nodeMissing === NULL) {{
         \\          nodes[current] = result;
-        \\{[remember]s}        }} else {{
+        \\        }} else {{
         \\          _nodeMissing = NULL;
         \\          materializeSubtree(current);
         \\        }}
@@ -645,13 +629,9 @@ fn writeNodeFunction(w: *Writer, mode: Mode) !void {
         \\    _nodeNext = current;
         \\    const result = nodes[i];
         \\
-    , .{
-        .capacity = node_work_capacity_initial,
-        .size = rt.NODE_SIZE,
-        .remember = remember,
-    });
+    , .{ .capacity = node_stack_capacity_initial, .size = rt.NODE_SIZE });
     if (mode == .parser) try w.writeAll(
-        \\    _nodes = undefined; _nodeWork = undefined; _nodeNext = 0;
+        \\    _nodes = undefined; _nodeStack = undefined; _nodeOnPath = undefined; _nodeNext = 0;
         \\
     );
     try w.writeAll(
@@ -866,13 +846,11 @@ fn writeChildTables(w: *Writer, mode: Mode) !void {
     @setEvalBranchQuota(1_000_000);
     // kind 0 is a NodeIndex, kind 1 a range with its length in slot+1
     try w.writeAll("const CHILD_SLOTS = [\n");
-    comptime var direct_slots_max: u32 = 0;
     inline for (@typeInfo(ast.NodeData).@"union".fields) |field| {
         try w.writeAll("  [");
         if (@typeInfo(field.type) == .@"struct") {
             comptime var first = true;
             comptime var child_slots_len = 0;
-            comptime var direct_slots_len: u32 = 0;
             inline for (std.meta.fields(field.type), 0..) |f, i| {
                 if (f.type == ast.NodeIndex or f.type == ast.IndexRange) {
                     if (!first) try w.writeAll(", ");
@@ -883,19 +861,13 @@ fn writeChildTables(w: *Writer, mode: Mode) !void {
                     });
                     first = false;
                     child_slots_len += 2;
-                    if (f.type == ast.NodeIndex) direct_slots_len += 1;
                 }
             }
             comptime std.debug.assert(child_slots_len <= std.math.maxInt(u8));
-            direct_slots_max = @max(direct_slots_max, direct_slots_len);
         }
         try w.writeAll("],\n");
     }
     try w.writeAll("];\n");
-    // bounds the subtree walk stack, since a node pushes at most one entry per child edge
-    comptime std.debug.assert(direct_slots_max > 0);
-    comptime std.debug.assert(direct_slots_max <= 16);
-    try w.print("const CHILD_DIRECT_MAX = {d};\n", .{direct_slots_max});
     if (mode == .parser) return;
 
     try w.writeAll("const IS_NODE = [\n");
