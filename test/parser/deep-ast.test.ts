@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import type { Node } from "yuku-parser";
 import { parse } from "yuku-parser";
 
 const fixture = "test/parser/misc/deep-concat-chain.js";
@@ -30,4 +31,32 @@ test("materializes a deeply nested call chain", async () => {
         expression = expression.callee.object;
     }
     expect(expression).toMatchObject({ type: "Identifier", name: "chain" });
+});
+
+test("materializes nested type annotations deeper than the JavaScript stack", () => {
+    // the parser records a typed identifier before its annotation, so every level here
+    // is decoded through the subtree walk rather than the index sweep
+    const depth = 5_000;
+    const source = `let value: ${"(next: ".repeat(depth)}number${") => void".repeat(depth)};`;
+    const program = parse(source, { lang: "ts" }).program;
+    const declaration = program.body[0];
+    if (declaration?.type !== "VariableDeclaration") {
+        throw new Error("expected a variable declaration");
+    }
+
+    let identifier: Node | undefined = declaration.declarations[0]?.id;
+    for (let level = 0; level < depth; level++) {
+        if (identifier?.type !== "Identifier") {
+            throw new Error(`expected a typed identifier at level ${level + 1}`);
+        }
+        const annotation: Node | null | undefined = identifier.typeAnnotation?.typeAnnotation;
+        if (annotation?.type !== "TSFunctionType") {
+            throw new Error(`expected a function type at level ${level + 1}`);
+        }
+        identifier = annotation.params[0];
+    }
+    if (identifier?.type !== "Identifier") {
+        throw new Error("expected the innermost parameter");
+    }
+    expect(identifier.typeAnnotation?.typeAnnotation).toMatchObject({ type: "TSNumberKeyword" });
 });
